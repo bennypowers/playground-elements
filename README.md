@@ -216,6 +216,10 @@ properties:
 - `label`: Optional label for display in `playground-tab-bar`. If omitted, the
   filename is displayed.
 
+- `hidden`: If `true`, this file will not be displayed in `playground-tab-bar`,
+  Defaults to `false`. Note that users will also not be allowed to create a new
+  file with this name.
+
 ```html
 <playground-ide project-src="/path/to/my/project.json"> </playground-ide>
 ```
@@ -258,50 +262,146 @@ precedence. When either are set, inline scripts are ignored.
 ## Module resolution
 
 By default, bare module specifiers in JavaScript and TypeScript files are
-transformed to `unpkg.com` URLs:
+assumed to refer to the `latest` tag of that package on NPM, and are fetched
+from `unpkg.com`. Relative module specifiers resolve to local project files.
 
-```js
-// What you write
+```ts
+// Bare module specifier.
+// Resolves to lit-html@latest through unpkg.
 import {html} from 'lit-html';
 
-// What playground serves
-import {html} from 'https://unpkg.com/lit-html?module';
+// Relative module specifier.
+// Resolves to the project file named "local.js".
+import {foo} from './local.js';
 ```
 
-To customize module resolution you can configure an _import map_. You may want
-to do this to pin a specific version, change CDNs, or point to a locally served
-copy of a module:
+> Note: Playground does not _directly_ transform bare module specifiers to
+> `unpkg.com` or other CDN URLs. Instead, they are always transformed to URLs
+> like
+> `https://<host>/<service-worker-scope>/<session-id>/node_modules/<package>@<version>/<path>.js`,
+> which then _proxy_ requests to the CDN. This allows Playground to transform
+> bare module specifiers in dependencies in the same way it does for project
+> files.
+
+### Specifying versions
+
+#### Inline
+
+Project modules can specify an NPM
+[semver](https://docs.npmjs.com/about-semantic-versioning) range or tag directly
+in their `import` statement:
+
+```ts
+// Resolves to latest version in this semver range.
+import {html} from 'lit-html@^2.0.0-pre.1';
+```
+
+#### package.json
+
+If the project contains a `package.json` file, then those `dependencies` will
+determine the version (unless the version is already specified inline):
 
 ```js
 {
-  "files": { ... },
-  "importMap": {
-    "imports": {
-      "lit-html": "https://cdn.skypack.dev/lit-html@^1.3.0",
-      "lit-html/": "https://cdn.skypack.dev/lit-html@^1.3.0/"
+  "dependencies": {
+    "lit-html": "^2.0.0-pre.2"
+  }
+}
+```
+
+```ts
+// Resolves to 2.0.0-pre.2 instead of latest because
+// of the project's package.json file.
+import {html} from 'lit-html';
+```
+
+### Configuring CDNs
+
+To serve dependencies from a location other than `unpkg.com`, use the `cdns`
+field of `project.json`. The `cds` field is an ordered array of objects mapping
+package names and versions to a source.
+
+#### Format
+
+| Property                           | Value                                                                                                                                                                           |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source`                           | Available options: `unpkg`, `custom`. Required.                                                                                                                                 |
+| `packages`                         | Array of package versions to match. If omitted, matches all packages.                                                                                                           |
+| `packages.name`                    | Package name to match. Required.                                                                                                                                                |
+| `packages.version`                 | Package version provided by this source. If omitted, matches all versions. (Note this is a _specific_ version, not a semver range).                                             |
+| <h5 colspan="2">Custom source</h5> |                                                                                                                                                                                 |
+| `url`                              | URL template. Available special values: `<PACKAGE>`, `<VERSION>`, `<PATH>`.<br>Note if you need to include a literal `<` or `>`, URI encode it as `%3C` and `%3E` respectively. |
+
+#### CDN examples
+
+In this example, we resolve compatible versions of `lit-html` and `lit-element`
+to a local URL, and fall back to `unpkg.com` for any other package.
+
+We also include a `package.json` file in the project, so that bare module
+specifiers will prefer the versions we have locally by default, regardless of
+what is tagged `latest` on NPM. It's marked `hidden` so that users don't see it
+in their tab bar.
+
+```json
+{
+  "cdns": [
+    {
+      "source": "custom",
+      "url": "/lib/<PACKAGE>/<PATH>",
+      "packages": [
+        {
+          "name": "lit-html",
+          "version": "2.0.0-pre.3"
+        },
+        {
+          "name": "lit-element",
+          "version": "3.0.0-pre.3"
+        }
+      ]
+    },
+    {
+      "source": "unpkg"
+    }
+  ],
+  "files": {
+    "package.json": {
+      "content": "{\"dependencies\":{\"lit-html\":\"^2.0.0-pre.1\",\"lit-element\":\"^3.0.0-pre.1\"}}",
+      "hidden": true
     }
   }
 }
 ```
 
-When using inline project files, you can specify your import map like so:
+In this example, we only allow one dependency, and we serve it from a specific
+URL. Any other dependency will error.
 
-```html
-<playground-ide>
-  <script type="sample/importmap">
+```json
+{
+  "cdns": [
     {
-      "imports": {
-        "lit-html": "https://cdn.skypack.dev/lit-html@^1.3.0",
-        "lit-html/": "https://cdn.skypack.dev/lit-html@^1.3.0/"
-      }
+      "source": "custom",
+      "url": "https://example.com/my-library/dist/<PATH>",
+      "packages": [
+        {
+          "name": "my-library"
+        }
+      ]
     }
-  </script>
-  ...
-</playground-ide>
+  ]
+}
 ```
 
-If an import map is defined, but does not contain an entry for a bare module,
-then playground defaults to the `unpkg.com` URL.
+The default configuration is equivalent to:
+
+```json
+{
+  "cdns": [
+    {
+      "source": "unpkg"
+    }
+  ]
+}
+```
 
 ## TypeScript
 
@@ -785,12 +885,7 @@ but are not yet available. Follow and comment on
 There are currently some missing features in module resolution that you might be
 hitting. Please comment on the issue if it affects you:
 
-- Imports are only transformed in project source files, not in transitive
-  imports
-  ([#104](https://github.com/PolymerLabs/playground-elements/issues/104))
 - Imports in HTML files are not transformed
   ([#93](https://github.com/PolymerLabs/playground-elements/issues/93))
 - Dynamic imports are not transformed
   ([#27](https://github.com/PolymerLabs/playground-elements/issues/27))
-- The import map `scopes` field is not supported
-  ([#103](https://github.com/PolymerLabs/playground-elements/issues/103))
